@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);NU1902;NU1903;CA2022;CA2252</NoWarn>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1902;NU1903;CA2022</WarningsNotAsErrors>
+  </PropertyGroup>
+</Project>

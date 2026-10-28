@@ -25,6 +25,16 @@ namespace ET
                     Options.Instance.SingleThread = 1;
                     Options.Instance.Console = 1;
                 }
+
+                Console.WriteLine();
+                Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+                Console.WriteLine("║             华夏 MMORPG 服务端  (ET10)                    ║");
+                Console.WriteLine("╠══════════════════════════════════════════════════════════╣");
+                Console.WriteLine($"║  SceneName  : {Options.Instance.SceneName,-46}║");
+                Console.WriteLine($"║  StartConfig: {Options.Instance.StartConfig,-46}║");
+                Console.WriteLine($"║  Process    : {Options.Instance.Process,-46}║");
+                Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
+                Console.WriteLine();
                 
                 World.Instance.AddSingleton<Logger>().Log = new NLogger(Options.Instance.SceneName);
 				
@@ -33,10 +43,17 @@ namespace ET
                 World.Instance.AddSingleton<TimeInfo>();
                 World.Instance.AddSingleton<FiberManager>();
                 World.Instance.AddSingleton<CodeLoader>().Start();
+                Console.WriteLine("[OK] 启动完成");
+                Console.WriteLine();
             }
             catch (Exception e)
             {
+                Console.WriteLine();
+                Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+                Console.WriteLine("║  ❌ 启动异常!                                            ║");
+                Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
                 Console.WriteLine(e);
+                Console.WriteLine();
             }
         }
 
