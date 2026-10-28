@@ -154,12 +154,57 @@ namespace ET.Server
                         break;
                     }
 
-                    // ===== Phase 1: 文本握手 =====
-                    string line = await ReadLineAsync(stream, parentCt);
-                    if (line == null) return;
-                    line = line.Trim();
+                    // ===== Phase 1: 先尝试读 8 字节帧头, 判断是二进制帧还是文本行 =====
+                    byte[] probeBuf = new byte[HX_Frame.HeaderSize];
+                    int probeRead = await ReadExactAsync(stream, probeBuf, HX_Frame.HeaderSize, parentCt);
+                    if (probeRead == 0) return;
 
-                    Log.Info($"[华夏→] [{ep}] C→S: {line}");
+                    // 尝试解析为帧头
+                    bool looksLikeFrame = HX_Frame.TryParseHeader(probeBuf, out int bodyLen, out int origLen, out bool enableEnc);
+                    looksLikeFrame = looksLikeFrame && bodyLen > 0 && bodyLen <= 8192;
+
+                    if (looksLikeFrame)
+                    {
+                        // ===== 真实客户端: 直接发 Phase 2 二进制帧 (跳过文本握手!) =====
+                        // 把已读的 8 字节放回流 (MemoryStream 粘包缓冲复用 HandlePhase2 逻辑)
+                        Log.Info($"[华夏] 检测到二进制帧 (bodyLen={bodyLen}, enableEnc={enableEnc}), 跳过文本握手, 直接进入 Phase 2");
+
+                        // 创建加密器 (Phase 2 开始)
+                        sendEnc = new HX_StreamEnc(HX_StreamEnc.DefaultKey,
+                            new byte[] { 0x13, 0x51, 0x02, 0x19 });
+                        recvEnc = new HX_StreamEnc(HX_StreamEnc.DefaultKey,
+                            new byte[] { 0x17, 0x51, 0x71, 0x00, 0x68, 0x31, 0x01, 0x00 });
+
+                        // 用已读的 8 字节构造 pending buffer, 交给 HandlePhase2 继续读 body
+                        var preloaded = new MemoryStream();
+                        preloaded.Write(probeBuf, 0, HX_Frame.HeaderSize);
+
+                        state = HS.Phase2Binary;
+                        await HandlePhase2WithPrefix(parent, stream, recvBuf, recvEnc, sendEnc, ep, parentCt, preloaded);
+                        break;
+                    }
+
+                    // ===== MockClient: 文本握手 (回退) =====
+                    // 把 probeBuf 里的字节当成文本开头, 再 ReadLineAsync 读完一行
+                    string line;
+                    if (probeRead < HX_Frame.HeaderSize)
+                    {
+                        // 没读满 8 字节, 直接当一行读
+                        line = Encoding.ASCII.GetString(probeBuf, 0, probeRead).Trim();
+                    }
+                    else
+                    {
+                        // 读满了 8 字节但不是帧头 → 可能是文本行的开头
+                        // 把这 8 字节拼回去再读完一行
+                        string tail = await ReadLineAsync(stream, parentCt);
+                        if (tail == null) return;
+                        line = Encoding.ASCII.GetString(probeBuf) + tail;
+                        line = line.Trim();
+                    }
+
+                    if (string.IsNullOrEmpty(line)) continue;
+
+                    Log.Info($"[华夏→] [{ep}] C→S (text): {line}");
 
                     var (reply, nextState, aid) = await HandleHandshakeAsync(parent, state, line);
                     state = nextState;
@@ -174,8 +219,6 @@ namespace ET.Server
 
                     if (state == HS.Phase2Binary)
                     {
-                        // 握手成功, 创建默认加密器 (Phase 2 开始)
-                        // 逆向自 DataLink.dll: Recv seed 8字节, Send seed 4字节
                         sendEnc = new HX_StreamEnc(HX_StreamEnc.DefaultKey,
                             new byte[] { 0x13, 0x51, 0x02, 0x19 });
                         recvEnc = new HX_StreamEnc(HX_StreamEnc.DefaultKey,
@@ -195,6 +238,111 @@ namespace ET.Server
                 try { tcp.Close(); } catch { }
                 parent.Sessions.TryRemove(ep, out _);
                 Log.Info($"[华夏] 客户端断开: {ep}, 会话数={parent.Sessions.Count}");
+            }
+        }
+
+        // ===== 工具: 精确读 N 字节 =====
+        private static async ETTask<int> ReadExactAsync(NetworkStream stream, byte[] buf, int exactCount, CancellationToken ct)
+        {
+            int total = 0;
+            while (total < exactCount)
+            {
+                int n = await stream.ReadAsync(buf, total, exactCount - total, ct);
+                if (n <= 0) break;
+                total += n;
+            }
+            return total;
+        }
+
+        // ===== 带预读缓冲的 Phase 2 (真实客户端跳过握手直接进 Phase 2) =====
+        private static async ETTask HandlePhase2WithPrefix(
+            HX_TcpAdapterComponent parent, NetworkStream stream, byte[] buf,
+            HX_StreamEnc recvEnc, HX_StreamEnc sendEnc,
+            string ep, CancellationToken ct, MemoryStream preloaded)
+        {
+            // 把 HandlePhase2 逻辑搬过来, 只是初始 pending = preloaded
+            byte[] headerBuf = new byte[HX_Frame.HeaderSize];
+            var pending = preloaded; // 复用 HandlePhase2 的粘包缓冲逻辑
+
+            while (!ct.IsCancellationRequested)
+            {
+                int headerNeed = HX_Frame.HeaderSize - (int)pending.Length;
+                if (pending.Length < HX_Frame.HeaderSize)
+                {
+                    int headerRead = await stream.ReadAsync(headerBuf, 0, headerNeed, ct);
+                    if (headerRead == 0) return;
+                    pending.Write(headerBuf, 0, headerRead);
+                }
+
+                byte[] header = pending.ToArray();
+                if (!HX_Frame.TryParseHeader(header, out int bodyLen, out int origLen, out bool enableEnc))
+                    return;
+
+                int totalFrame = HX_Frame.HeaderSize + bodyLen;
+                int remaining = totalFrame - (int)pending.Length;
+
+                if (remaining > 0)
+                {
+                    byte[] bodyBuf = new byte[remaining];
+                    int bodyRead = await stream.ReadAsync(bodyBuf, 0, remaining, ct);
+                    if (bodyRead == 0) return;
+                    pending.Write(bodyBuf, 0, bodyRead);
+                }
+
+                byte[] fullFrame = pending.ToArray();
+                byte[] body = new byte[bodyLen];
+                Array.Copy(fullFrame, HX_Frame.HeaderSize, body, 0, bodyLen);
+
+                byte[] decrypted;
+                if (enableEnc && recvEnc != null)
+                {
+                    recvEnc.Reset();
+                    decrypted = recvEnc.Decrypt(body);
+                }
+                else
+                {
+                    decrypted = body;
+                }
+
+                if (decrypted.Length >= 2)
+                {
+                    ushort opcode = BitConverter.ToUInt16(decrypted, 0);
+                    string opcodeName = HX_Opcode.Name(opcode);
+                    Log.Info($"[华夏→] [{ep}] Phase2(direct): opcode={opcodeName} (0x{opcode:X4}), body={bodyLen}B, enc={enableEnc}");
+                    if (decrypted.Length > 2)
+                        Log.Info($"[华夏→] [{ep}] Phase2(direct): payload={Convert.ToHexString(decrypted[2..])}");
+
+                    byte[] replyPayload = null;
+                    switch (opcode)
+                    {
+                        case HX_Opcode.CMD_LOGIN: replyPayload = Encoding.UTF8.GetBytes("ACK_LOGIN OK"); break;
+                        case HX_Opcode.CMD_USER:  replyPayload = Encoding.UTF8.GetBytes("ACK_USER OK"); break;
+                        case HX_Opcode.CMD_CHAT:  replyPayload = Encoding.UTF8.GetBytes("ACK_CHAT OK"); break;
+                        case HX_Opcode.CMD_GAME:  replyPayload = Encoding.UTF8.GetBytes("ACK_GAME OK"); break;
+                        case HX_Opcode.CMD_THING: replyPayload = Encoding.UTF8.GetBytes("ACK_THING OK"); break;
+                        default:                   replyPayload = Encoding.UTF8.GetBytes($"ACK_{opcode:X4} UNKNOWN"); break;
+                    }
+
+                    byte[] plainReply = new byte[2 + replyPayload.Length];
+                    BitConverter.GetBytes(opcode).CopyTo(plainReply, 0);
+                    replyPayload.CopyTo(plainReply, 2);
+
+                    sendEnc.Reset();
+                    byte[] encReply = sendEnc.Encrypt(plainReply);
+                    byte[] hdr = HX_Frame.BuildHeader(encReply.Length, plainReply.Length, true);
+                    byte[] fullReply = new byte[HX_Frame.HeaderSize + encReply.Length];
+                    hdr.CopyTo(fullReply, 0);
+                    encReply.CopyTo(fullReply, HX_Frame.HeaderSize);
+                    await stream.WriteAsync(fullReply, 0, fullReply.Length, ct);
+
+                    Log.Info($"[华夏←] [{ep}] Phase2(direct): 回包 {opcodeName} ({fullReply.Length}B)");
+                }
+                else
+                {
+                    Log.Warning($"[华夏→] [{ep}] Phase2(direct): body too short ({decrypted.Length}B)");
+                }
+
+                pending.SetLength(0);
             }
         }
 
