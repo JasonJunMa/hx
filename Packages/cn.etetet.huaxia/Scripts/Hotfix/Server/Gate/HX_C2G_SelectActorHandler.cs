@@ -31,28 +31,38 @@ namespace ET.Server
 
             DBComponent db = dbManager.GetZoneDB(session.Fiber().Zone);
 
-            // 1. 查 Actor + 校验归属
-            List<Actor> actors = await db.Query<Actor>(a => a.Id == request.ActorId && a.UserId == player.AccountId);
+            // 1. 通过 Player.Account (用户名) 反查 AccountId
+            List<Account> accounts = await db.Query<Account>(a => a.UserName == player.Account);
+            if (accounts.Count == 0)
+            {
+                response.Error = ErrorCode.ERR_ConnectGateKeyError;
+                response.Message = $"账号不存在: {player.Account}";
+                Log.Warning($"[华夏] ❌ SelectActor: 账号不存在 Account={player.Account}");
+                return;
+            }
+            long accountId = accounts[0].Id;
+
+            // 2. 查 Actor + 校验归属
+            List<Actor> actors = await db.Query<Actor>(a => a.Id == request.ActorId && a.UserId == accountId);
             if (actors.Count == 0)
             {
                 response.Error = ErrorCode.ERR_ConnectGateKeyError;
-                response.Message = $"角色不存在或不属于当前账号! ActorId={request.ActorId}, AccountId={player.AccountId}";
-                Log.Warning($"[华夏] ❌ SelectActor 校验失败: ActorId={request.ActorId}, AccountId={player.AccountId}");
+                response.Message = $"角色不存在或不属于当前账号! ActorId={request.ActorId}, AccountId={accountId}";
+                Log.Warning($"[华夏] ❌ SelectActor 校验失败: ActorId={request.ActorId}, AccountId={accountId}");
                 return;
             }
 
             Actor actor = actors[0];
 
-            // 2. 写入 Player.ActorId (后续 EnterMap 用)
-            player.ActorId = actor.Id;
             response.MapId = actor.MapId;
             response.LocationX = actor.LocationX;
             response.LocationY = actor.LocationY;
             response.Message = "OK";
 
-            Log.Info($"[华夏] ✅ SelectActor 成功: PlayerId={player.Id}, AccountId={player.AccountId}, ActorId={actor.Id}, Name={actor.ActorName}, Map={actor.MapId}({actor.LocationX},{actor.LocationY})");
+            Log.Info($"[华夏] ✅ SelectActor 成功: Account={player.Account}, AccountId={accountId}, ActorId={actor.Id}, Name={actor.ActorName}, Map={actor.MapId}({actor.LocationX},{actor.LocationY})");
 
             actor.Dispose();
+            accounts[0].Dispose();
             await ETTask.CompletedTask;
         }
     }

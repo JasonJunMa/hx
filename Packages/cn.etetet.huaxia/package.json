@@ -1,0 +1,23 @@
+{
+  "name": "cn.etetet.huaxia",
+  "displayName": "华夏 MMORPG",
+  "version": "4.0.0",
+  "unity": "2022.3",
+  "category": "Game/MMORPG",
+  "author": {
+    "name": "华夏 ET10"
+  },
+  "description": "华夏 MMORPG 协议层 — TCP Adapter + StreamEnc 加密 + MockClient",
+  "dependencies": {
+    "cn.etetet.core": "4.0.0",
+    "cn.etetet.netinner": "4.0.0",
+    "cn.etetet.login": "4.0.0",
+    "cn.etetet.unit": "4.0.0",
+    "cn.etetet.map": "4.0.0",
+    "cn.etetet.db": "4.0.0",
+    "cn.etetet.servicediscovery": "4.0.0",
+    "cn.etetet.actorlocation": "4.0.0",
+    "cn.etetet.aoi": "4.0.0",
+    "cn.etetet.numeric": "4.0.0"
+  }
+}
